@@ -1,4 +1,3 @@
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 # Copyright 2026 Tensor Auto Inc. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,14 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Policies module for OpenTau.
-
-This module exports the configuration classes for available policies,
-such as PI0, PI05, and Value policy.
 """
+PI05 Continuous State Policy Module.
 
-from .pi0.configuration_pi0 import PI0Config as PI0Config
-from .pi05.configuration_pi05 import PI05Config as PI05Config
-from .pi05_continuous_state.configuration_pi05 import PI05ContinuousStateConfig as PI05ContinuousStateConfig
-from .value.configuration_value import ValueConfig as ValueConfig
+This module implements a variant of the π05 (Pi05) Vision-Language-Action Flow Model
+that uses continuous state embeddings projected directly into the VLM embedding space,
+rather than discretizing the state into text tokens. Response prediction has been removed.
+"""
