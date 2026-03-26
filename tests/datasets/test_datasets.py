@@ -121,9 +121,7 @@ def test_add_frame_wrong_shape_python_float(tmp_path, empty_lerobot_dataset_fact
     dataset = empty_lerobot_dataset_factory(root=tmp_path / "test", features=features)
     with pytest.raises(
         ValueError,
-        match=re.escape(
-            "The feature 'state' is not a 'np.ndarray'. Expected type is 'float32', but type '<class 'float'>' provided instead.\n"
-        ),
+        match=re.escape("The feature 'state' is expected to be a numpy array, but got 'float'.\n"),
     ):
         dataset.add_frame({"state": 1.0, "task": "Dummy task"})
 
@@ -143,9 +141,7 @@ def test_add_frame_wrong_shape_numpy_ndim_0(tmp_path, empty_lerobot_dataset_fact
     dataset = empty_lerobot_dataset_factory(root=tmp_path / "test", features=features)
     with pytest.raises(
         ValueError,
-        match=re.escape(
-            "The feature 'state' is not a 'np.ndarray'. Expected type is 'float32', but type '<class 'numpy.float32'>' provided instead.\n"
-        ),
+        match=re.escape("The feature 'state' is expected to be a numpy array, but got 'float32'.\n"),
     ):
         dataset.add_frame({"state": np.float32(1.0), "task": "Dummy task"})
 
@@ -334,10 +330,13 @@ def check_standard_data_format(item, delta_timestamps_params, dataset, train_pip
             assert item[key].shape == shape, f"{key}"
             assert isinstance(item[key], torch.BoolTensor), f"{key}"
 
-    # test delta_timestamps
-    for timestamp_param in delta_timestamps_params:
-        assert timestamp_param["input_group"].shape == (2,)
-        assert (timestamp_param["action"].shape[0],) == (train_pipeline_config.action_chunk,)
+    # test delta_timestamps — per-feature keys
+    dt_mean = delta_timestamps_params[0]
+    for key, val in dt_mean.items():
+        if key == "action":
+            assert val.shape == (train_pipeline_config.action_chunk,)
+        else:
+            assert val.shape == (1,), f"{key} has unexpected shape {val.shape}"
 
 
 @pytest.mark.slow  # 3 sec
