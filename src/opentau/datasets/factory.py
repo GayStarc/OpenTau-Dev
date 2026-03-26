@@ -62,7 +62,8 @@ Example:
 """
 
 import copy
-from typing import Tuple, Union
+import logging
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -228,6 +229,31 @@ def make_dataset(
     return dataset
 
 
+logger = logging.getLogger(__name__)
+
+
+def _resolve_weights(
+    configured_weights: Optional[List[float]], datasets: list, label: str = "datasets"
+) -> List[float]:
+    """Return explicit weights or infer them from dataset lengths.
+
+    Args:
+        configured_weights: User-provided weights, or None to infer.
+        datasets: The list of datasets whose lengths are used when
+            ``configured_weights`` is None.
+        label: Human-readable label used in the log message
+            (e.g. "train" or "val").
+
+    Returns:
+        A list of float weights, one per dataset.
+    """
+    if configured_weights is not None:
+        return configured_weights
+    weights = [float(len(ds)) for ds in datasets]
+    logger.info("No explicit weights provided; inferring %s weights from dataset lengths: %s", label, weights)
+    return weights
+
+
 def make_dataset_mixture(
     cfg: TrainPipelineConfig, return_advantage_input: bool = False
 ) -> Union[WeightedDatasetMixture, Tuple[WeightedDatasetMixture, WeightedDatasetMixture]]:
@@ -235,6 +261,8 @@ def make_dataset_mixture(
 
     Args:
         cfg (TrainPipelineConfig): The configuration containing the datasets to mix.
+            If `cfg.dataset_mixture.weights` is None, each dataset is weighted
+            by its length (cast to float).
         return_advantage_input (bool): Whether the datasets should return advantage inputs including "success",
             "episode_end_idx", "current_idx", "last_step", "episode_index", and "timestamp". Defaults to False.
 
@@ -251,14 +279,12 @@ def make_dataset_mixture(
         else:
             datasets.append(res)
 
-    train_mixture = WeightedDatasetMixture(
-        cfg, datasets, cfg.dataset_mixture.weights, cfg.dataset_mixture.action_freq
-    )
+    train_weights = _resolve_weights(cfg.dataset_mixture.weights, datasets, label="train")
+    train_mixture = WeightedDatasetMixture(cfg, datasets, train_weights, cfg.dataset_mixture.action_freq)
 
     if val_datasets:
-        val_mixture = WeightedDatasetMixture(
-            cfg, val_datasets, cfg.dataset_mixture.weights, cfg.dataset_mixture.action_freq
-        )
+        val_weights = _resolve_weights(cfg.dataset_mixture.weights, val_datasets, label="val")
+        val_mixture = WeightedDatasetMixture(cfg, val_datasets, val_weights, cfg.dataset_mixture.action_freq)
         return train_mixture, val_mixture
 
     return train_mixture

@@ -118,8 +118,9 @@ class DatasetMixtureConfig:
 
     Args:
         datasets: List of dataset configs to be used in the mixture.
-        weights: List of weights for each dataset in the mixture. Must be the
-            same length as `datasets`. Defaults to empty list.
+        weights: Optional list of weights for each dataset in the mixture. Must be the
+            same length as `datasets` when provided. If None, weights are inferred
+            from dataset lengths. Defaults to None.
         action_freq: Frequency at which actions from the dataset mixture are
             resampled, in Hz. Defaults to 30.0.
         image_resample_strategy: Resample strategy for image features. Must be
@@ -129,14 +130,16 @@ class DatasetMixtureConfig:
             Defaults to 'nearest'.
 
     Raises:
-        ValueError: If the length of `weights` doesn't match `datasets`, if
-            `action_freq` is not positive, or if resample strategies are invalid.
+        ValueError: If `weights` is provided and its length doesn't match
+            `datasets`, if `action_freq` is not positive, or if resample
+            strategies are invalid.
     """
 
     # List of dataset configs to be used in the mixture.
     datasets: list[DatasetConfig] = field(default_factory=list)
-    # List of weights for each dataset in the mixture. Must be the same length as `datasets`.
-    weights: list[float] = field(default_factory=list)
+    # Optional list of weights for each dataset in the mixture.
+    # Must be the same length as `datasets` when provided.
+    weights: list[float] | None = None
     # Frequency at which the actions from dataset mixture are resampled, in Hz.
     action_freq: float = 30.0
     # Resample strategy for image features
@@ -151,7 +154,7 @@ class DatasetMixtureConfig:
 
     def __post_init__(self):
         """Validate dataset mixture configuration."""
-        if len(self.datasets) != len(self.weights):
+        if self.weights is not None and len(self.datasets) != len(self.weights):
             raise ValueError("The length of `weights` must match the length of `datasets`.")
         if self.action_freq <= 0:
             raise ValueError(f"`action_freq` must be a positive number, got {self.action_freq}.")
