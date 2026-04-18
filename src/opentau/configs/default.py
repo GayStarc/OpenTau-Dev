@@ -63,6 +63,9 @@ class DatasetConfig:
         image_transforms: Configuration for image transformations. Defaults to
             ImageTransformsConfig().
         revision: Git revision of the dataset repository to use. Defaults to None.
+        action_freq: Optional per-dataset action frequency override used when
+            computing delta timestamps. When None, the mixture-level
+            `action_freq` is used. Defaults to None.
         use_imagenet_stats: Whether to use ImageNet statistics for normalization.
             Defaults to True.
         video_backend: Video codec backend to use. Defaults to a safe default codec.
@@ -84,6 +87,7 @@ class DatasetConfig:
     episodes: list[int] | None = None
     image_transforms: ImageTransformsConfig = field(default_factory=ImageTransformsConfig)
     revision: str | None = None
+    action_freq: float | None = None
     use_imagenet_stats: bool = True
     video_backend: str = field(default_factory=get_safe_default_codec)
     stats: dict[str, dict[str, np.ndarray]] | None = None
@@ -100,6 +104,8 @@ class DatasetConfig:
         """Validate dataset configuration and register custom mappings if provided."""
         if (self.repo_id is None) == (self.vqa is None):
             raise ValueError("Exactly one of `repo_id` or `vqa` for Dataset config should be set.")
+        if self.action_freq is not None and self.action_freq <= 0:
+            raise ValueError(f"`action_freq` must be a positive number when provided, got {self.action_freq}.")
 
         # If data_features_name_mapping is provided, upsert it into the global DATA_FEATURES_NAME_MAPPING
         if self.data_features_name_mapping is not None:

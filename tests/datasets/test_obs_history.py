@@ -163,6 +163,16 @@ class TestResolveDeltaTimestampsHistory:
         np.testing.assert_allclose(dt_mean["camera0"], expected)
         np.testing.assert_allclose(dt_mean["state"], expected)
 
+    def test_dataset_action_freq_override_takes_precedence(self):
+        """Per-dataset action_freq overrides the mixture default."""
+        cfg, ds_cfg = _make_train_cfg(n_obs_history=3, history_interval=1, action_freq=30.0)
+        ds_cfg.action_freq = 10.0
+        meta = _make_metadata({"camera0": {}, "state": {}, "actions": {}})
+        dt_mean, _, _, _ = resolve_delta_timestamps(cfg, ds_cfg, meta)
+        np.testing.assert_allclose(dt_mean["camera0"], np.array([-0.2, -0.1, 0.0]))
+        np.testing.assert_allclose(dt_mean["state"], np.array([-0.2, -0.1, 0.0]))
+        np.testing.assert_allclose(dt_mean["actions"][:3], np.array([0.0, 0.1, 0.2]))
+
     def test_history_t1_single_delta(self):
         """n_obs_history=1 should produce [0.0] (same as no history)."""
         cfg, ds_cfg = _make_train_cfg(n_obs_history=1, history_interval=1)

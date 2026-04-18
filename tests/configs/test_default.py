@@ -32,6 +32,20 @@ def test_datasetconfig(repo_id, vqa, ground_truth):
             DatasetConfig(repo_id=repo_id, vqa=vqa)
 
 
+def test_datasetconfig_action_freq_override():
+    cfg = DatasetConfig(repo_id="repo1", action_freq=5.0)
+    assert cfg.action_freq == 5.0
+
+
+@pytest.mark.parametrize("invalid_freq", [0, -5.0])
+def test_datasetconfig_invalid_action_freq_raises_error(invalid_freq):
+    with pytest.raises(
+        ValueError,
+        match=rf"`action_freq` must be a positive number when provided, got {invalid_freq}\.",
+    ):
+        DatasetConfig(repo_id="repo1", action_freq=invalid_freq)
+
+
 def test_valid_instantiation_with_data():
     """Tests a valid configuration with datasets and matching weights."""
     cfg = DatasetMixtureConfig(

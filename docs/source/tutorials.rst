@@ -12,6 +12,7 @@ This section provides step-by-step guides for common tasks in OpenTau, including
    tutorials/evaluation
    tutorials/deployment
    tutorials/datasets
+   tutorials/bridge_fractal_training_zh
    tutorials/visualization
    RL
    tutorials/human_demo

@@ -357,7 +357,8 @@ class LeRobotDatasetMetadata(DatasetMetadata):
             self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
         else:
             self.episodes_stats = load_episodes_stats(self.root)
-            self.stats = aggregate_stats(list(self.episodes_stats.values()))
+            cached_stats = load_stats(self.root)
+            self.stats = cached_stats if cached_stats is not None else aggregate_stats(list(self.episodes_stats.values()))
 
         self.advantages = load_advantages(self.root)
 

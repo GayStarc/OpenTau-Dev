@@ -112,7 +112,7 @@ def resolve_delta_timestamps(
         ``LeRobotDataset.compute_delta_params``.
     """
     delta_timestamps: dict[str, list[float]] = {}
-    action_freq = cfg.dataset_mixture.action_freq
+    action_freq = dataset_cfg.action_freq or cfg.dataset_mixture.action_freq
 
     if dataset_cfg.repo_id is None:
         raise ValueError("dataset_cfg.repo_id must not be None when resolving delta timestamps.")
