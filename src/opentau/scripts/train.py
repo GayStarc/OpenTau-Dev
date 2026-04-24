@@ -118,14 +118,33 @@ def update_policy(
     return train_metrics
 
 
+def _find_unused_params_from_env() -> bool:
+    """Parse the ``FIND_UNUSED_PARAMS`` env var into a bool.
+
+    Under DDP this controls whether the reducer walks the autograd graph
+    after each backward to discover parameters that did not receive a
+    gradient. It is silently ignored under DeepSpeed. Default is True
+    for safety (policies with config-gated heads can produce unused
+    params); set ``FIND_UNUSED_PARAMS=false`` once a run has been
+    audited with ``scripts/find_unused_params.py`` to reclaim the
+    per-step graph-walk cost (~10-15% of step time on pi05).
+
+    Returns:
+        bool: True when the env var is unset or equals ``"true"``
+        (case-insensitive); False for any other value.
+    """
+    return os.environ.get("FIND_UNUSED_PARAMS", "true").lower() == "true"
+
+
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     cfg.validate()
 
+    find_unused = _find_unused_params_from_env()
     accelerator_kwargs = {
         "step_scheduler_with_optimizer": False,
         "split_batches": False,  # split_batches == True is not working anyways
-        "kwargs_handlers": [DistributedDataParallelKwargs(find_unused_parameters=True)],
+        "kwargs_handlers": [DistributedDataParallelKwargs(find_unused_parameters=find_unused)],
     }
     if cfg.wandb.enable:
         accelerator_kwargs["log_with"] = "wandb"
