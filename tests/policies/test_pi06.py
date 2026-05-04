@@ -35,6 +35,7 @@ from opentau.policies.pi06.gemma3_with_expert import (
     apply_rope,
 )
 from opentau.policies.pi06.modeling_pi06 import (
+    flow_matching_masked_mse,
     make_att_2d_masks,
     pad_discrete_tokens,
     resize_with_pad,
@@ -45,8 +46,9 @@ from opentau.policies.pi06.modeling_pi06 import (
 
 class TestMakeAtt2dMasks:
     """Locks in the block-causal semantics the π0.6 model card depends on:
-    image + text = one bidirectional block, response / discrete-action =
-    subsequent causal blocks, action suffix = its own bidirectional block."""
+    images = bidirectional prefix; language tokens, response and FAST
+    discrete-action tokens = causal (per §2 "use causal attention among the
+    text tokens"); action suffix in the expert = its own bidirectional block."""
 
     def test_pure_bidirectional(self):
         pad = torch.tensor([[True, True, True, True]])
@@ -105,6 +107,35 @@ class TestMakeAtt2dMasks:
         # Padded cross key should be masked out.
         assert not torch.any(mask[0, :, 2])
 
+    def test_embed_prefix_layout_has_causal_language_block(self):
+        """π0.6 model card §2: language tokens use causal attention while
+        sitting after a bidirectional image prefix. This simulates the
+        `att_masks` list `PI06FlowMatching.embed_prefix` builds and asserts
+        the language-vs-language sub-block is strictly causal, while still
+        seeing the full image prefix.
+        """
+        num_img_embs, num_lang_embs = 4, 5
+        att = torch.tensor([[0] * num_img_embs + [1] * num_lang_embs])
+        pad = torch.ones_like(att, dtype=torch.bool)
+        mask = make_att_2d_masks(pad, att)
+
+        img_slice = slice(0, num_img_embs)
+        lang_slice = slice(num_img_embs, num_img_embs + num_lang_embs)
+
+        # Image prefix is fully bidirectional within itself.
+        assert torch.all(mask[0, img_slice, img_slice])
+
+        # Language-vs-language is strictly causal: every lang token sees its
+        # predecessors and itself, but not later lang tokens.
+        lang_block = mask[0, lang_slice, lang_slice]
+        expected_causal = torch.tril(torch.ones(num_lang_embs, num_lang_embs, dtype=torch.bool))
+        assert torch.equal(lang_block, expected_causal)
+
+        # Language still sees the entire image prefix (prefix-LM cross attention).
+        assert torch.all(mask[0, lang_slice, img_slice])
+        # Image tokens do NOT see later language tokens (they precede them).
+        assert not torch.any(mask[0, img_slice, lang_slice])
+
 
 # RoPE shape preservation + different theta values
 
@@ -132,6 +163,76 @@ class TestApplyRope:
         positions = torch.zeros(1, 1, dtype=torch.long)
         out = apply_rope(x, positions, max_wavelength=10_000.0)
         assert torch.allclose(out, x, atol=1e-6)
+
+
+# MSE-loss masking on fully-padded action samples (web / VQA co-training).
+#
+# The π0.6 paper §2 says the VLM is trained jointly on FAST action tokens and
+# co-training examples like multi-modal web data. VQA samples have no real
+# actions, so `VQADataset` sets `actions_is_pad = all-True`. The flow-matching
+# loss in `PI06FlowMatching.forward` must honour that mask, otherwise the
+# action expert is trained to regress to zero on web samples — a silent bug.
+#
+# These tests drive the production helper `flow_matching_masked_mse`
+# (the same function `PI06FlowMatching.forward` calls) so a regression in the
+# masking arithmetic — e.g. dropping the `~actions_is_pad` AND, or moving the
+# slice-then-sum boundary — fails here, not just in slow GPU integration.
+
+
+class TestMSEMaskOnFullyPaddedActions:
+    """Locks in the contract: an item with `actions_is_pad` all-True
+    contributes exactly zero MSE, regardless of the noisy-action targets."""
+
+    def test_all_padded_yields_zero_loss(self):
+        torch.manual_seed(0)
+        u_t = torch.randn(2, 8, 16)
+        v_t = torch.randn(2, 8, 16)
+        actions_is_pad = torch.ones(2, 8, dtype=torch.bool)
+        prefix_mask = torch.zeros(2, 8, dtype=torch.bool)
+        loss = flow_matching_masked_mse(
+            u_t=u_t,
+            v_t=v_t,
+            prefix_mask=prefix_mask,
+            actions_is_pad=actions_is_pad,
+            max_action_dim=16,
+        )
+        assert loss.item() == 0.0
+
+    def test_partial_padded_only_counts_real_steps(self):
+        """Mixed mask: half the chunk is padded; loss should equal the MSE
+        averaged only over the real timesteps."""
+        torch.manual_seed(0)
+        u_t = torch.randn(1, 8, 4)
+        v_t = torch.randn(1, 8, 4)
+        actions_is_pad = torch.tensor([[False, False, False, False, True, True, True, True]])
+        prefix_mask = torch.zeros(1, 8, dtype=torch.bool)
+        loss = flow_matching_masked_mse(
+            u_t=u_t,
+            v_t=v_t,
+            prefix_mask=prefix_mask,
+            actions_is_pad=actions_is_pad,
+            max_action_dim=4,
+        )
+        # Independent reference: mean over the first 4 timesteps only.
+        expected = ((u_t[0, :4] - v_t[0, :4]) ** 2).sum() / (4 * 4)
+        assert torch.isclose(loss, expected, atol=1e-6)
+
+    def test_prefix_mask_excludes_frozen_steps(self):
+        """Frozen-prefix steps (real-time-inference delay) must be excluded
+        the same way `actions_is_pad` is — covers the other AND-input."""
+        torch.manual_seed(0)
+        u_t = torch.randn(1, 8, 4)
+        v_t = torch.randn(1, 8, 4)
+        prefix_mask = torch.tensor([[True, True, True, False, False, False, False, False]])
+        loss = flow_matching_masked_mse(
+            u_t=u_t,
+            v_t=v_t,
+            prefix_mask=prefix_mask,
+            actions_is_pad=None,
+            max_action_dim=4,
+        )
+        expected = ((u_t[0, 3:] - v_t[0, 3:]) ** 2).sum() / (5 * 4)
+        assert torch.isclose(loss, expected, atol=1e-6)
 
 
 # PI06Config defaults + validators
@@ -513,7 +614,25 @@ def test_complete_pi06_pipeline_integration_smoke(lerobot_dataset_metadata):
     config.output_features = {k: ft for k, ft in features.items() if ft.type is FeatureType.ACTION}
     config.input_features = {k: ft for k, ft in features.items() if k not in config.output_features}
 
-    policy = PI06Policy(config, dataset_stats=lerobot_dataset_metadata.stats)
+    # The shared lerobot_dataset_metadata fixture carries actions stats shaped
+    # (50, 32) — matching the default PI06Config(chunk_size=50). This test
+    # uses chunk_size=10 to keep the model small, so override the actions
+    # stats to (10, 32) before constructing Normalize buffers; otherwise
+    # `(actions - min) / (max - min + EPS)` mismatches at dim=1 (actions is
+    # (B, 10, 32) but the buffer is (50, 32)).
+    import copy
+
+    import numpy as np
+
+    dataset_stats = copy.deepcopy(lerobot_dataset_metadata.stats)
+    for k in ("max", "mean", "min", "std"):
+        dataset_stats["actions"][k] = np.full(
+            (config.chunk_size, 32),
+            float(dataset_stats["actions"][k].flatten()[0]),
+            dtype=np.float32,
+        )
+
+    policy = PI06Policy(config, dataset_stats=dataset_stats)
     policy.to(dtype=torch.bfloat16, device="cuda")
 
     batch = {
