@@ -430,8 +430,12 @@ class PI07LowLevelPolicy(PreTrainedPolicy):
 
         Appends the single-frame observation from ``batch`` to internal deque
         buffers, then assembles a batch with ``n_obs_history`` evenly-spaced
-        frames (interval = ``history_interval``).  Early in an episode, missing
-        history slots are zero-padded.
+        frames (interval = ``history_interval``). Early in an episode the
+        buffer is partially filled, so some slots are zero-padded; the
+        returned ``"obs_history_is_pad"`` (B, T) bool tensor flags those
+        slots ``True`` so the model can mask them out of attention. Once the
+        buffer is full (typically a handful of steps in), the mask is all
+        ``False`` and the encoder uses the real history.
 
         Expected batch keys:
             - ``"state"``: (B, D) current proprioceptive state.
@@ -439,8 +443,9 @@ class PI07LowLevelPolicy(PreTrainedPolicy):
             - ``"prompt"``: list[str] language instructions (passed through unchanged).
             - Any other metadata keys are forwarded unchanged.
 
-        Returns a new dict with ``"state"`` expanded to (B, T, D) and image keys
-        expanded to (B, T, C, H, W), where T = ``n_obs_history``.
+        Returns a new dict with ``"state"`` expanded to (B, T, D), image keys
+        expanded to (B, T, C, H, W), and a new ``"obs_history_is_pad"`` (B, T)
+        bool tensor (``True`` = padded). T = ``n_obs_history``.
         """
         assert self.config.n_obs_history is not None
         n_hist: int = self.config.n_obs_history
@@ -465,6 +470,8 @@ class PI07LowLevelPolicy(PreTrainedPolicy):
         # sample n_hist frames at the configured interval
         buf_len = len(self._state_buffer)
         missing = buf_maxlen - buf_len  # how many slots are still empty
+        bsize = batch["state"].shape[0]
+        device = batch["state"].device
 
         # Pass through all non-image, non-state keys (e.g. "prompt" and other metadata).
         temporal_batch = {key: v for key, v in batch.items() if key not in img_keys and key != "state"}
@@ -489,6 +496,21 @@ class PI07LowLevelPolicy(PreTrainedPolicy):
                 else:
                     cam_frames.append(self._obs_buffers[key][idx])
             temporal_batch[key] = torch.stack(cam_frames, dim=1)  # (B, T, C, H, W)
+
+        # Same `idx < 0` decision as the loops above: a slot is padded iff the
+        # buffer didn't have an entry to fill it. The pattern is identical
+        # for state and every camera (they share the same buffer length), so
+        # we emit one (B, T) mask. Broadcast across batch — every sample sees
+        # the same padding pattern at any given step. Without this, the
+        # encoder's None-fallback masks ALL history at inference (including
+        # genuine mid-episode frames once the buffer is full); with it, only
+        # the actually-padded start-of-episode slots get masked.
+        pad_pattern = torch.tensor(
+            [i * interval - missing < 0 for i in range(n_hist)],
+            dtype=torch.bool,
+            device=device,
+        )
+        temporal_batch["obs_history_is_pad"] = pad_pattern.unsqueeze(0).expand(bsize, n_hist)
 
         return temporal_batch
 
@@ -564,7 +586,12 @@ class PI07LowLevelPolicy(PreTrainedPolicy):
 
         batch = self.normalize_inputs(batch)
 
-        videos, vid_masks = self.prepare_videos(batch)
+        # `_build_history_batch` (called from `select_action` upstream) emits
+        # this; it's None when the caller skipped that step (e.g. n_obs_history
+        # is None/1, or sample_actions is invoked directly without the buffer).
+        obs_history_is_pad = batch.get("obs_history_is_pad")
+
+        videos, vid_masks = self.prepare_videos(batch, obs_history_is_pad=obs_history_is_pad)
         lang_tokens, lang_masks = self.prepare_language(batch)
         response_tokens, response_masks = self.prepare_response(batch)
         state = self.prepare_state(batch)
@@ -616,6 +643,7 @@ class PI07LowLevelPolicy(PreTrainedPolicy):
             metadata_masks=metadata_masks,
             response_tokens=response_tokens,
             response_masks=response_masks,
+            obs_history_is_pad=obs_history_is_pad,
         )
 
         action_feature = self.config.action_feature
@@ -1121,16 +1149,23 @@ class PI07LowLevelFlowMatching(nn.Module):
         time = time_beta * 0.999 + 0.001
         return time
 
-    def embed_video(self, video: Tensor) -> Tensor:
+    def embed_video(self, video: Tensor, obs_history_is_pad: Tensor | None = None) -> Tensor:
         """Encode a video through SpaceTimeSiglip + Perceiver reducer + projection.
 
         Args:
             video: (B, T, C, H, W)
+            obs_history_is_pad: Optional ``(B, T)`` bool mask — ``True`` for
+                padded history frames. Threaded into the SpaceTime SigLIP
+                encoder so temporal attention blocks padded frames (pixel-
+                zeroing alone is insufficient — the patch embedding bias and
+                temporal PE for ``t < T-1`` are non-zero, so zero pixels
+                still produce non-zero hidden states the current frame would
+                otherwise attend to).
 
         Returns:
             (B, num_video_tokens, vlm_hidden_size)
         """
-        return self.video_encoder(video)
+        return self.video_encoder(video, obs_history_is_pad=obs_history_is_pad)
 
     def embed_prefix(
         self,
@@ -1241,7 +1276,7 @@ class PI07LowLevelFlowMatching(nn.Module):
         has_any_optional = bool(has_response or has_subgoal or has_metadata)
 
         for vid, vid_mask in zip(videos, vid_masks, strict=True):
-            vid_emb = self.embed_video(vid)  # (B, num_video_tokens, vlm_hidden)
+            vid_emb = self.embed_video(vid, obs_history_is_pad=obs_history_is_pad)
             vid_emb = vid_emb.to(dtype=_preferred_dtype())
 
             num_vid_embs = vid_emb.shape[1]
@@ -1292,9 +1327,19 @@ class PI07LowLevelFlowMatching(nn.Module):
         state_emb = self.state_proj(state.to(dtype=_preferred_dtype()))
         num_state_tokens = state_emb.shape[1]  # T
         if obs_history_is_pad is not None:
-            state_mask = ~obs_history_is_pad  # True = real, False = padded
+            state_mask = ~obs_history_is_pad  # (B, T) — `~` allocates a fresh tensor
         else:
-            state_mask = torch.ones(bsize, num_state_tokens, dtype=torch.bool, device=state.device)
+            # Absent → assume all history is padded; only current step is real.
+            state_mask = torch.zeros(bsize, num_state_tokens, dtype=torch.bool, device=state.device)
+        # Current step (t = T-1) is ALWAYS real even when the dataset's
+        # history_state_drop_prob augmentation flips obs_history_is_pad to
+        # all-True. Without this override the policy would condition on no
+        # state at all, since attention to the current state token would be
+        # masked out — defeating the purpose of preserving the current frame.
+        # Both branches above produce fresh tensors (`~` allocates;
+        # `torch.zeros` allocates), so the `[:, -1] = True` write below does
+        # not reach the caller's `obs_history_is_pad`.
+        state_mask[:, -1] = True
 
         embs.append(state_emb)
         pad_masks.append(state_mask)
@@ -1739,6 +1784,7 @@ class PI07LowLevelFlowMatching(nn.Module):
         metadata_masks: Tensor | None = None,
         response_tokens: Tensor | None = None,
         response_masks: Tensor | None = None,
+        obs_history_is_pad: Tensor | None = None,
     ) -> Tensor:
         """Inference: iteratively denoise to produce a continuous action chunk.
 
@@ -1763,6 +1809,13 @@ class PI07LowLevelFlowMatching(nn.Module):
             metadata_masks: Optional mask for metadata tokens.
             response_tokens: Optional subtask response token IDs.
             response_masks: Optional mask for response tokens.
+            obs_history_is_pad: Optional ``(B, T)`` bool mask flagging padded
+                history slots (``True`` = padded). Emitted by
+                ``PI07LowLevelPolicy._build_history_batch`` so the encoder can
+                use real mid-episode history while still masking out the
+                start-of-episode zero-fill. ``None`` falls back to "all
+                history padded except current" via ``embed_prefix`` and the
+                encoder's None-fallback.
 
         Returns:
             Denoised action chunk ``(B, chunk_size, max_action_dim)``.
@@ -1786,6 +1839,7 @@ class PI07LowLevelFlowMatching(nn.Module):
             metadata_masks,
             subgoal_images=subgoal_images,
             subgoal_img_masks=subgoal_img_masks,
+            obs_history_is_pad=obs_history_is_pad,
         )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
