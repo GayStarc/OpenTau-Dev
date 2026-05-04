@@ -22,6 +22,7 @@ This module provides default configuration classes for:
 - Evaluation settings and parameters
 """
 
+import warnings
 from dataclasses import dataclass, field
 
 import draccus
@@ -105,10 +106,16 @@ class DatasetConfig:
     robot_type: str | None = None
     control_mode: str | None = None
 
-    # Ratio of the dataset to be used for validation. Please specify a value.
-    # If `val_freq` is set to 0, a validation dataset will not be created and this value will be ignored.
-    # Defaults to 0.05.
-    val_split_ratio: float = 0.05
+    # DEPRECATED. Set `val_split_ratio` on `DatasetMixtureConfig` instead — the
+    # mixture-level value is the single source of truth and is applied uniformly
+    # to every dataset in the mixture. This per-dataset field is retained only
+    # so that pre-existing JSON configs continue to parse; setting it here has
+    # no effect on the actual split. The default is `None` (sentinel meaning
+    # "user did not set this") so that
+    # `DatasetMixtureConfig.__post_init__` can distinguish a real per-dataset
+    # override from the unset default and only emit a `DeprecationWarning` in
+    # the former case.
+    val_split_ratio: float | None = None
 
     def __post_init__(self):
         """Validate dataset configuration and register custom mappings if provided."""
@@ -278,9 +285,22 @@ class DatasetMixtureConfig:
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"`{name}` must be in [0, 1], got {value}.")
 
-        # set the val_split_ratio for all datasets in the mixture
+        # `DatasetConfig.val_split_ratio` is deprecated — the mixture-level
+        # value is the single source of truth (read by `factory.make_dataset`).
+        # The per-dataset field defaults to `None`; warn only when the user
+        # actually set a value there, since that's the case where their input
+        # is being silently ignored.
         for dataset_cfg in self.datasets:
-            dataset_cfg.val_split_ratio = self.val_split_ratio
+            if dataset_cfg.val_split_ratio is not None:
+                warnings.warn(
+                    "`DatasetConfig.val_split_ratio` is deprecated and ignored; "
+                    "set `val_split_ratio` on `DatasetMixtureConfig` instead. "
+                    f"Got dataset value {dataset_cfg.val_split_ratio} "
+                    f"vs. mixture value {self.val_split_ratio}; the mixture "
+                    "value will be used.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
 
 
 @dataclass
