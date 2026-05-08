@@ -51,6 +51,7 @@ from opentau.utils.train_utils import (
     load_training_state,
     load_training_step,
     prune_old_checkpoints,
+    reseed_new_ranks_on_resume,
     save_checkpoint,
 )
 from opentau.utils.utils import (
@@ -504,6 +505,17 @@ def train(cfg: TrainPipelineConfig):
 
         # all processes should load the step & rng states
         step = load_training_state(cfg.checkpoint_path)
+
+        # load_training_state above applies the consolidated rng_state.safetensors
+        # to every rank, which would clobber any per-rank reseed. Run the per-rank
+        # reseed AFTER the consolidated load so the new ranks end up decorrelated.
+        # Per-rank random_states_<rank>.pkl is loaded by accelerator.load_state, but
+        # missing files (when resuming on more GPUs than were saved) are silently
+        # skipped, leaving new ranks with whichever RNG the consolidated load gave
+        # them — identical across all new ranks. Re-seed those new ranks
+        # deterministically here.
+        reseed_new_ranks_on_resume(cfg.checkpoint_path, accelerator, cfg.seed)
+
         logging.info(f"Resuming training from checkpoint {cfg.checkpoint_path}")
 
     policy.train()
