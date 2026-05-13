@@ -87,6 +87,7 @@ import functools
 import json
 import logging
 import math
+import re
 import shutil
 import traceback
 from abc import abstractmethod
@@ -97,10 +98,11 @@ import datasets
 import numpy as np
 import packaging.version
 import PIL.Image
+import pyarrow.dataset as pa_ds
 import torch
 import torch.nn.functional as F  # noqa: N812
 import torch.utils
-from datasets import concatenate_datasets, load_dataset
+from datasets import Dataset, DatasetInfo, concatenate_datasets
 from einops import rearrange
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.constants import REPOCARD_NAME
@@ -1260,7 +1262,12 @@ class LeRobotDataset(BaseDataset):
             delta_timestamps_lower,
             delta_timestamps_upper,
         )
-        self.episodes = episodes
+        # Sort episodes here so that hf_dataset row layout (sorted by
+        # episode_index after the glob in load_hf_dataset) stays aligned with
+        # episode_data_index["from"/"to"] (built in self.episodes order in
+        # get_episode_data_index). Mismatched order would silently return
+        # rows from the wrong episode for callers that pass an unsorted list.
+        self.episodes = sorted(episodes) if episodes is not None else None
         self.tolerance_s = tolerance_s
         self.skip_timestamp_check = skip_timestamp_check
         self.revision = revision if revision else CODEBASE_VERSION
@@ -1551,14 +1558,43 @@ class LeRobotDataset(BaseDataset):
 
     def load_hf_dataset(self) -> datasets.Dataset:
         """hf_dataset contains all the observations, states, actions, rewards, etc."""
-        if self.episodes is None:
-            path = str(self.root / "data")
-            hf_dataset = load_dataset("parquet", data_dir=path, split="train")
-        else:
-            files = [str(self.root / self.meta.get_data_file_path(ep_idx)) for ep_idx in self.episodes]
-            hf_dataset = load_dataset("parquet", data_files=files, split="train")
-
-        # TODO(aliberts): hf_dataset.set_format("torch")
+        # Derive the parquet glob from the meta data_path template so that
+        # datasets with a non-default `info["data_path"]` (deeper nesting,
+        # flat layout, etc.) keep working. Default template is
+        # "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
+        # which yields the glob "data/chunk-*/episode_*.parquet". Assumes the
+        # template uses simple `{name}` / `{name:fmt}` placeholders and no
+        # literal `{{`/`}}` escapes — true for every in-repo writer.
+        glob_pattern = re.sub(r"\{[^}]+\}", "*", self.meta.data_path)
+        paths = sorted(self.root.glob(glob_pattern))
+        if not paths:
+            raise FileNotFoundError(f"No parquet files matching {glob_pattern!r} under {self.root}")
+        features = get_hf_features_from_features(self.meta.features)
+        # Read parquet directly via pyarrow.dataset and wrap the resulting
+        # pa.Table in a HF Dataset. Going through `load_dataset("parquet", ...)`
+        # or `Dataset.from_parquet(...)` both route through ParquetDatasetBuilder,
+        # which rewrites the parquet bytes into an uncompressed Arrow cache at
+        # $HF_HOME/datasets/parquet/ — 1-5x the source size (compression-dependent)
+        # and one cache entry per distinct (paths, filter) combo. Issue #277 has
+        # the empirical numbers; verified on physical-intelligence/libero.
+        #
+        # Trade-off: `to_table(filter=...)` materializes the filtered rows into
+        # RAM rather than mmapping a disk-backed Arrow cache. RAM cost scales
+        # with `len(filtered rows) × avg-row-size`; concretely:
+        # ~350 MB for physical-intelligence/libero with episodes=[0..9],
+        # ~46 GB for humanoid-everyday-A-overlay with episodes=None (full corpus).
+        # Narrow `episodes=` picks are fine; an episodes=None load on a multi-GB
+        # image-heavy repo will OOM on a small dev box — pass a manageable
+        # subset, or restore a mmap'd Arrow cache via tmp pa.ipc files if RAM
+        # ever becomes the binding constraint.
+        #
+        # The `Dataset(table, info=DatasetInfo(features=features))` constructor
+        # signature has been stable since datasets 2.x; the project pin is
+        # `datasets>=2.19.0`, so we're well inside the supported window.
+        pa_dataset = pa_ds.dataset(list(map(str, paths)), format="parquet")
+        filter_expr = pa_ds.field("episode_index").isin(self.episodes) if self.episodes is not None else None
+        table = pa_dataset.to_table(filter=filter_expr)
+        hf_dataset = Dataset(table, info=DatasetInfo(features=features))
         hf_dataset.set_transform(hf_transform_to_torch)
         return hf_dataset
 
