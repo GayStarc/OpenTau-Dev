@@ -405,3 +405,127 @@ class TestPi0GradCkptEquivalence:
         assert out_a[0] is not None and out_b[0] is not None
         # Identical op sequence + identical weights + dropout=0.0 ⇒ bit-equal.
         assert torch.equal(out_a[0], out_b[0])
+
+
+class TestPI0ExecutionHorizon:
+    """Regression coverage for ``n_action_steps`` as a short execution horizon.
+
+    ``chunk_size`` is the trained prediction horizon (always decoded);
+    ``n_action_steps`` (<= chunk_size) is how many actions are executed before
+    re-querying. ``n_action_steps < chunk_size`` used to broadcast-crash the
+    denoise/MSE paths. pi0 has no real-time-delay path; its analog of the guard
+    is ``safety_buffer`` (the overlap-refill knob), and ``select_action`` refills
+    via ``safety_buffer`` rather than a delay prefix.
+    """
+
+    MAX_STATE_DIM = 32
+    MAX_ACTION_DIM = 32
+
+    @classmethod
+    def _config(cls, chunk_size=10, n_action_steps=3, safety_buffer=0):
+        return PI0Config(
+            chunk_size=chunk_size,
+            n_action_steps=n_action_steps,
+            safety_buffer=safety_buffer,
+            max_state_dim=cls.MAX_STATE_DIM,
+            max_action_dim=cls.MAX_ACTION_DIM,
+        )
+
+    def test_guard_rejects_short_horizon_with_safety_buffer(self):
+        # A shortened execution horizon is not compatible with a non-zero safety
+        # buffer; the config must reject it loudly.
+        with pytest.raises(ValueError, match="safety_buffer"):
+            self._config(chunk_size=10, n_action_steps=3, safety_buffer=2)
+
+    def test_guard_allows_short_horizon_without_safety_buffer(self):
+        cfg = self._config(chunk_size=10, n_action_steps=3, safety_buffer=0)
+        assert (cfg.chunk_size, cfg.n_action_steps, cfg.safety_buffer) == (10, 3, 0)
+
+    def test_guard_allows_full_horizon_with_safety_buffer(self):
+        # n_action_steps == chunk_size keeps the safety-buffer overlap available.
+        cfg = self._config(chunk_size=10, n_action_steps=10, safety_buffer=2)
+        assert cfg.safety_buffer == 2
+
+    def test_select_action_executes_first_n_then_requeries(self):
+        """Model decodes the full ``chunk_size`` chunk, but ``select_action``
+        executes only the first ``n_action_steps`` before re-querying.
+        """
+        chunk_size, n_steps, bsz = 10, 3, 2
+        cfg = self._config(chunk_size=chunk_size, n_action_steps=n_steps, safety_buffer=0)
+
+        policy = object.__new__(PI0Policy)
+        policy.config = cfg
+        policy.eval = lambda: None  # bypass nn.Module.eval (no __init__ was run)
+        PI0Policy.reset(policy)
+
+        calls = {"n": 0}
+
+        def fake_sample_actions(batch, noise=None):
+            # Return a full chunk_size chunk; element value encodes
+            # (call_index * 1000 + timestep) so we can assert which timesteps run.
+            calls["n"] += 1
+            ts = torch.arange(chunk_size, dtype=torch.float32).reshape(1, chunk_size, 1)
+            return (calls["n"] * 1000 + ts).expand(bsz, chunk_size, self.MAX_ACTION_DIM).clone()
+
+        policy.sample_actions = fake_sample_actions
+        batch = {"state": torch.zeros(bsz, self.MAX_STATE_DIM)}
+
+        # First n_steps actions all come from a single decode (call 1), in order.
+        acts = [PI0Policy.select_action(policy, batch) for _ in range(n_steps)]
+        assert calls["n"] == 1
+        assert [tuple(a.shape) for a in acts] == [(bsz, self.MAX_ACTION_DIM)] * n_steps
+        assert [a[0, 0].item() for a in acts] == [1000.0, 1001.0, 1002.0]
+
+        # Queue drained after n_action_steps -> next call re-queries (call 2).
+        a_next = PI0Policy.select_action(policy, batch)
+        assert calls["n"] == 2
+        assert a_next[0, 0].item() == 2000.0
+
+    def test_embed_suffix_attn_mask_spans_full_chunk(self, monkeypatch):
+        """Real-path guard the mocked select_action test above misses.
+
+        ``embed_suffix`` must build the action attention mask over the full
+        ``chunk_size``, not ``n_action_steps`` -- otherwise the ``att_masks`` and the
+        ``chunk_size``-length ``pad_masks`` mismatch and ``make_att_2d_masks`` crashes
+        for ``n_action_steps < chunk_size``. pi0 also builds its inference noise at
+        ``chunk_size`` now (so the decoded chunk, this mask, and the ``denoise_step``
+        output slice all align). pi0's ``embed_suffix`` hardcodes bfloat16; only the
+        sinusoidal time embedding is stubbed, with real (tiny) projections so the
+        state/action/time feature dims stay consistent through the concats.
+        """
+        import torch.nn as nn
+
+        from opentau.policies.pi0.modeling_pi0 import PI0FlowMatching
+
+        mod = "opentau.policies.pi0.modeling_pi0"
+        monkeypatch.setattr(
+            f"{mod}.create_sinusoidal_pos_embedding",
+            lambda timestep, dim, **kw: torch.zeros(1, dim),
+        )
+
+        cfg = PI0Config(
+            chunk_size=10,
+            n_action_steps=3,
+            safety_buffer=0,
+            max_state_dim=self.MAX_STATE_DIM,
+            max_action_dim=self.MAX_ACTION_DIM,
+            proj_width=16,
+        )
+        pw, dt = cfg.proj_width, torch.bfloat16
+        fm = object.__new__(PI0FlowMatching)
+        nn.Module.__init__(fm)  # set up _modules so we can attach the stub layers
+        fm.config = cfg
+        fm.state_proj = nn.Linear(cfg.max_state_dim, pw).to(dt)
+        fm.action_in_proj = nn.Linear(cfg.max_action_dim, pw).to(dt)
+        fm.action_time_mlp_in = nn.Linear(pw * 2, pw).to(dt)
+        fm.action_time_mlp_out = nn.Linear(pw, pw).to(dt)
+
+        out = PI0FlowMatching.embed_suffix(
+            fm,
+            torch.zeros(1, cfg.max_state_dim, dtype=dt),
+            torch.zeros(1, cfg.chunk_size, cfg.max_action_dim),
+            torch.zeros(1),
+        )
+        pad_masks, att_masks = out[1], out[2]
+        # one state token + chunk_size action tokens.
+        assert pad_masks.shape[1] == att_masks.shape[1] == 1 + cfg.chunk_size

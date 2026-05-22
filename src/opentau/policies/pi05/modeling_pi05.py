@@ -548,7 +548,12 @@ class PI05Policy(PreTrainedPolicy):
             delay = torch.tensor(delay, dtype=torch.long, device=batch["state"].device)
             actions = self.sample_actions(batch, noise=noise, action_prefix=action_prefix, delay=delay)
             actions = rearrange(actions, "b c d -> c b d")
-            self._action_queue.extend(actions[delay:])
+            # Execute only the first n_action_steps of the predicted chunk, then
+            # re-query with fresh observations (receding horizon). The config guard
+            # (n_action_steps < chunk_size => max_delay == 0 => delay == 0) keeps this
+            # slice in range and exactly n_action_steps long; when n_action_steps ==
+            # chunk_size it clamps to actions[delay:] (unchanged behaviour).
+            self._action_queue.extend(actions[delay : delay + self.config.n_action_steps])
             assert len(self._action_queue) == self.config.n_action_steps, (
                 f"Action queue must have {self.config.n_action_steps} actions"
             )
@@ -1229,8 +1234,12 @@ class PI05FlowMatching(nn.Module):
         action_mask = torch.ones(bsize, action_dim, dtype=torch.bool, device=device)
         pad_masks.append(action_mask)
 
-        # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] + ([0] * (self.config.n_action_steps - 1))
+        # Set attention masks so that image, language and state inputs do not attend to action tokens.
+        # The action block spans the full chunk_size (= the noise/x_t length, here and in the
+        # training forward); n_action_steps is the execution horizon applied later in select_action,
+        # not the number of action tokens. Using n_action_steps here would mismatch the chunk_size-
+        # length pad mask and crash make_att_2d_masks when n_action_steps < chunk_size.
+        att_masks += [1] + ([0] * (self.config.chunk_size - 1))
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
@@ -1366,7 +1375,10 @@ class PI05FlowMatching(nn.Module):
         )
 
         # compute mse loss for velocity
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        # Supervise the whole chunk the model was trained to predict. n_action_steps
+        # is the inference-time execution horizon only and must not truncate the
+        # training target (chunk_size is the prediction horizon).
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
         # Original openpi code, upcast attention output
         v_t = self.action_out_proj(suffix_out)
         v_t = v_t.to(dtype=torch.float32)
@@ -1611,7 +1623,10 @@ class PI05FlowMatching(nn.Module):
             adarms_cond=[None, adarms_cond],
         )
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        # Denoise the full chunk_size chunk so v_t matches x_t in the Euler step.
+        # n_action_steps (execution horizon) is applied later in select_action, not
+        # at decode time.
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
         v_t = self.action_out_proj(suffix_out)
         v_t = v_t.to(dtype=torch.float32)
         return v_t

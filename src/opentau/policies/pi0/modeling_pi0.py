@@ -368,7 +368,12 @@ class PI0Policy(PreTrainedPolicy):
         if len(self._action_queue) <= self.config.safety_buffer:
             actions = self.sample_actions(batch, noise=noise)
             actions = rearrange(actions, "b c d -> c b d")
-            self._action_queue.extend(actions)
+            # sample_actions decodes the full chunk_size chunk, but only the first
+            # n_action_steps form the execution horizon (receding horizon). The queue's
+            # maxlen is n_action_steps, so extending with the whole chunk would silently
+            # drop the leading actions and execute the wrong tail; slice explicitly. When
+            # n_action_steps == chunk_size this is the whole chunk (unchanged behaviour).
+            self._action_queue.extend(actions[: self.config.n_action_steps])
         return self._action_queue.popleft()
 
     @torch.no_grad()
@@ -766,8 +771,12 @@ class PI0FlowMatching(nn.Module):
         action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=device)
         pad_masks.append(action_time_mask)
 
-        # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] + ([0] * (self.config.n_action_steps - 1))
+        # Set attention masks so that image, language and state inputs do not attend to action tokens.
+        # The action block spans the full chunk_size (= the noise/x_t length, both in the training
+        # forward and inference). n_action_steps is the execution horizon applied later in
+        # select_action, not the number of action tokens; using it here would mismatch the
+        # chunk_size-length pad mask and crash make_att_2d_masks when n_action_steps < chunk_size.
+        att_masks += [1] + ([0] * (self.config.chunk_size - 1))
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
@@ -831,7 +840,10 @@ class PI0FlowMatching(nn.Module):
             use_cache=False,
             fill_kv_cache=False,
         )
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        # Supervise the whole chunk the model was trained to predict. n_action_steps
+        # is the inference-time execution horizon only and must not truncate the
+        # training target (chunk_size is the prediction horizon).
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
         # Original openpi code, upcast attention output
         v_t = self.action_out_proj(suffix_out)
         v_t = v_t.to(dtype=torch.float32)
@@ -865,7 +877,11 @@ class PI0FlowMatching(nn.Module):
         device = state.device
 
         if noise is None:
-            actions_shape = (bsize, self.config.n_action_steps, self.config.max_action_dim)
+            # Decode the full trained chunk (chunk_size); select_action executes only the
+            # first n_action_steps (receding horizon). This must be chunk_size so the action
+            # tokens, the embed_suffix attention mask, and the denoise_step output slice all
+            # align -- otherwise v_t (chunk_size) mismatches x_t (n_action_steps) in the Euler step.
+            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
             noise = self.sample_noise(actions_shape, device)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
@@ -947,7 +963,10 @@ class PI0FlowMatching(nn.Module):
             fill_kv_cache=False,
         )
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        # Denoise the full chunk_size chunk so v_t matches x_t in the Euler step.
+        # n_action_steps (execution horizon) is applied later in select_action, not
+        # at decode time.
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
         v_t = self.action_out_proj(suffix_out)
         v_t = v_t.to(dtype=torch.float32)
         return v_t
