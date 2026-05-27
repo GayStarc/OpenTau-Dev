@@ -36,6 +36,7 @@ from safetensors.torch import save_model as save_model_as_safetensor
 from torch import Tensor, nn
 
 from opentau.configs.policies import PreTrainedConfig
+from opentau.policies.normalize import _materialize
 from opentau.policies.utils import log_model_loading_keys
 from opentau.utils.hub import HubMixin
 
@@ -566,6 +567,187 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
                 "Sample keys: %s",
                 len(promoted),
                 promoted[:3],
+            )
+
+    @classmethod
+    def _strip_normalization_buffers_from_state_dict(
+        cls,
+        state_dict: dict[str, Tensor],
+        config: PreTrainedConfig,
+        *,
+        is_main_process: bool = True,
+    ) -> tuple[dict[str, Tensor], frozenset[str]]:
+        """Strip saved ``normalize_*`` / ``unnormalize_*`` buffers from a state
+        dict when ``config.skip_normalization_weights`` is set, so the
+        ``per_dataset_stats``-initialised buffers from ``__init__`` survive
+        the load. ``requires_grad=False`` on those tensors means training
+        alone cannot recover from inheriting the wrong stats.
+
+        Distinct from ``config.save_normalization_stats=False`` (which keeps
+        stats out of the on-disk safetensors in the first place): this knob
+        ignores stats that are *already* baked into an existing checkpoint —
+        the use case is finetuning an old checkpoint whose saved stats were
+        aggregated over a different dataset mixture than the finetuning data.
+
+        When the flag is off, returns ``(state_dict, frozenset())`` unchanged
+        so callers can use the result unconditionally. When the flag is on:
+
+        - On the strip-fired path (at least one matching key in the dict),
+          returns a *filtered* dict with every key matching
+          :py:func:`is_norm_buffer_key` removed, plus the ``frozenset`` of
+          stripped keys. On the no-match path (flag set but no
+          ``normalize_*`` / ``unnormalize_*`` keys in the dict), returns
+          the input dict unchanged by identity — same as the flag-off
+          contract — paired with an empty ``frozenset``.
+        - Logs an ``INFO`` line with the number of dropped keys on the main
+          process, or a ``WARNING`` if the flag was set but no matching keys
+          were present (so a user who flipped the flag *expecting* to void
+          the saved stats gets a clear signal that the flag was a no-op).
+        - Resets ``config.skip_normalization_weights = False`` on the
+          *in-memory* config **whether keys were dropped or the no-op
+          warning fired**. Persistence requires ``save_pretrained``: an
+          in-process resume that subsequently saves a checkpoint will
+          persist ``False`` to that checkpoint's ``config.json``. But
+          re-running ``from_pretrained`` on the original source path
+          (e.g. an interactive notebook session that hasn't yet saved)
+          will re-read ``True`` from the source ``config.json`` and
+          re-strip.
+
+        The returned ``stripped_keys`` set is intended to be used by the
+        caller to (a) filter out the deliberately-dropped keys from
+        ``load_state_dict``'s ``missing_keys`` warning, and (b) gate the
+        post-load :py:meth:`_assert_normalize_buffers_initialized` check
+        (truthy ⇒ the strip actually ran ⇒ ``per_dataset_stats`` must have
+        provided the replacements).
+
+        Args:
+            state_dict: The state dict about to be passed to ``model.load_state_dict``.
+            config: The model's :py:class:`~opentau.configs.policies.PreTrainedConfig`.
+                Mutated in place when the strip fires (one-shot reset).
+            is_main_process: Whether the caller is the main process; gates
+                logging so distributed runs do not duplicate messages.
+
+        Returns:
+            ``(filtered_state_dict, stripped_keys)``. When the flag is off,
+            this is ``(state_dict, frozenset())`` — the input dict is
+            returned unchanged.
+        """
+        if not config.skip_normalization_weights:
+            return state_dict, frozenset()
+
+        stripped_keys: frozenset[str] = frozenset(key for key in state_dict if is_norm_buffer_key(key))
+
+        # One-shot semantics: the flag is consumed by this load (whether the
+        # strip actually dropped keys or the no-op warning fired). Reset on
+        # the model's config so the next save_pretrained() persists False,
+        # and later resumes / inference loads do not re-strip the now-correct
+        # finetuned buffers.
+        config.skip_normalization_weights = False
+
+        if not stripped_keys:
+            # Flag was set but no matching keys in the dict — skip the O(N)
+            # filtering comprehension (a fresh dict identical to the input)
+            # and return the input by identity, matching the flag-off
+            # contract.
+            if is_main_process:
+                logging.warning(
+                    "skip_normalization_weights=True but no normalize_/unnormalize_ "
+                    "keys were present in the saved state dict; the flag had no effect."
+                )
+            return state_dict, stripped_keys
+
+        filtered_state_dict = {key: val for key, val in state_dict.items() if key not in stripped_keys}
+        if is_main_process:
+            logging.info(
+                "skip_normalization_weights=True; dropped %d saved normalize/unnormalize buffer keys",
+                len(stripped_keys),
+            )
+        return filtered_state_dict, stripped_keys
+
+    @classmethod
+    def _assert_normalize_buffers_initialized(
+        cls, model: nn.Module, *, stripped_keys: frozenset[str]
+    ) -> None:
+        """Raise ``ValueError`` if the strip ran but ``per_dataset_stats`` was
+        not wired in, leaving Normalize / Unnormalize buffers at the ``inf``
+        sentinel.
+
+        Distinct error path from :py:meth:`_check_norm_stats_loaded`: that
+        one fires on the ``save_normalization_stats=False`` round-trip when
+        the user forgets to pass ``ds_meta=`` to ``make_policy``. This one
+        fires on the ``skip_normalization_weights=True`` round-trip when
+        the user forgets ``per_dataset_stats`` in ``__init__`` — same
+        symptom (inf buffers), different message pointing at the right
+        knob.
+
+        Without this guard, the next forward crashes inside
+        :py:meth:`~opentau.policies.normalize.Normalize.forward` with a
+        ``"use a pretrained model"`` assertion that actively misleads when a
+        pretrained model *was* used — the saved buffers were just deliberately
+        dropped, so the message points the user away from the real fix.
+
+        Must be called **outside** any broad ``try/except Exception`` block
+        in ``from_pretrained``, so the ``ValueError`` is not swallowed and
+        replaced with a warning + a model that crashes on its first batch.
+
+        Args:
+            model: The model after ``load_state_dict`` has run.
+            stripped_keys: The frozenset returned by
+                :py:meth:`_strip_normalization_buffers_from_state_dict` — used
+                to gate the check so it only fires when the strip actually
+                ran (empty frozenset ⇒ no-op).
+
+        Raises:
+            ValueError: If ``stripped_keys`` is non-empty and at least one
+                Normalize/Unnormalize buffer parameter on ``model`` still
+                holds ``torch.inf``.
+        """
+        if not stripped_keys:
+            return
+        # Walk the same NORM_MODULE_NAMES attribute tree that
+        # `_check_norm_stats_loaded` iterates, so the two guards stay
+        # synchronized with `_save_pretrained`'s detach/restore loop and
+        # `_inject_stats`.
+        #
+        # Note: the check intentionally does NOT cross-reference each inf
+        # buffer against ``stripped_keys`` (which would be a stricter
+        # "the specific buffer we just stripped is still inf" check). The
+        # broader "any normalize buffer is inf" check is safe here because
+        # ``create_stats_buffers`` rejects partial stats at ``__init__`` —
+        # buffers are either fully populated (per_dataset_stats supplied)
+        # or all at the inf sentinel (per_dataset_stats=None). There is no
+        # reachable mixed state, so "any inf" ⇔ "per_dataset_stats missing"
+        # ⇔ the actionable user error the message describes.
+        #
+        # Note: ``Normalize`` registers stats as ``nn.Parameter(..., requires_grad=False)``
+        # rather than via ``register_buffer``, so we iterate
+        # ``named_parameters()``, not ``named_buffers()``. Same convention as
+        # the inline ``Normalize.forward`` checks (see ``normalize.py``) and
+        # :py:meth:`_check_norm_stats_loaded`.
+        #
+        # ``_materialize`` is defensive: under FSDP2 (``fully_shard``), the
+        # param would be a ``DTensor`` and ``torch.isinf`` would raise the
+        # mixed-Tensor/DTensor error. ``from_pretrained`` runs before
+        # ``accelerator.prepare`` today (so params are still plain Tensors
+        # here), but the call is cheap on plain Tensors and keeps the
+        # helper safe for any future caller that invokes it post-wrap.
+        inf_buffers: list[str] = []
+        for module_attr in NORM_MODULE_NAMES:
+            module = getattr(model, module_attr, None)
+            if module is None:
+                continue
+            for name, param in module.named_parameters(recurse=True):
+                if name.startswith("buffer_") and torch.isinf(_materialize(param)).any():
+                    inf_buffers.append(f"{module_attr}.{name}")
+        if inf_buffers:
+            raise ValueError(
+                "skip_normalization_weights=True requires `per_dataset_stats` "
+                "to be passed to __init__ (e.g. via "
+                "`opentau.policies.factory.make_policy(..., ds_meta=...)`) so "
+                "the fresh buffers can replace the stripped saved ones; got "
+                f"{len(inf_buffers)} uninitialized (inf) buffer(s): "
+                + ", ".join(inf_buffers[:5])
+                + (f", ... ({len(inf_buffers) - 5} more)" if len(inf_buffers) > 5 else "")
             )
 
     def _tile_linear_input_weight(self, state_dict_to_load: dict):
