@@ -864,6 +864,101 @@ def test_make_dataset_per_dataset_skip_false_overrides_mixture_true(train_pipeli
         cleanup()
 
 
+def test_make_dataset_per_dataset_val_split_ratio_wins(train_pipeline_config):
+    """A per-dataset `DatasetConfig.val_split_ratio` overrides the mixture default."""
+    dataset_cfg = train_pipeline_config.dataset_mixture.datasets[0]
+    cleanup = _register_mapping(dataset_cfg.repo_id)
+    try:
+        dataset_cfg.val_split_ratio = 0.2
+        train_pipeline_config.dataset_mixture.val_split_ratio = 0.05
+        train_pipeline_config.val_freq = 1  # enable the train/val split branch
+
+        with (
+            patch("opentau.datasets.factory.LeRobotDatasetMetadata") as mock_meta_cls,
+            patch("opentau.datasets.factory.LeRobotDataset") as mock_ds_cls,
+        ):
+            mock_meta_cls.return_value = MagicMock(features=[])
+            mock_ds = MagicMock(meta=MagicMock(info={}, stats={}, camera_keys=[]))
+            mock_ds.__len__.return_value = 100
+            mock_ds.shallow_copy_with_dropout.return_value = mock_ds
+            mock_ds_cls.return_value = mock_ds
+
+            result = make_dataset(dataset_cfg, train_pipeline_config)
+
+        assert isinstance(result, tuple)
+        _, val_dataset = result
+        # 0.2 (per-dataset) wins over 0.05 (mixture): int(100 * 0.2) == 20.
+        assert len(val_dataset) == 20
+    finally:
+        cleanup()
+
+
+def test_make_dataset_inherits_mixture_val_split_ratio(train_pipeline_config):
+    """When the per-dataset `val_split_ratio` is None, the mixture default applies."""
+    dataset_cfg = train_pipeline_config.dataset_mixture.datasets[0]
+    cleanup = _register_mapping(dataset_cfg.repo_id)
+    try:
+        assert dataset_cfg.val_split_ratio is None  # dataclass default (inherit)
+        train_pipeline_config.dataset_mixture.val_split_ratio = 0.1
+        train_pipeline_config.val_freq = 1
+
+        with (
+            patch("opentau.datasets.factory.LeRobotDatasetMetadata") as mock_meta_cls,
+            patch("opentau.datasets.factory.LeRobotDataset") as mock_ds_cls,
+        ):
+            mock_meta_cls.return_value = MagicMock(features=[])
+            mock_ds = MagicMock(meta=MagicMock(info={}, stats={}, camera_keys=[]))
+            mock_ds.__len__.return_value = 100
+            mock_ds.shallow_copy_with_dropout.return_value = mock_ds
+            mock_ds_cls.return_value = mock_ds
+
+            result = make_dataset(dataset_cfg, train_pipeline_config)
+
+        assert isinstance(result, tuple)
+        _, val_dataset = result
+        # None (per-dataset) inherits mixture 0.1: int(100 * 0.1) == 10.
+        assert len(val_dataset) == 10
+    finally:
+        cleanup()
+
+
+def test_make_dataset_per_dataset_val_split_ratio_zero_opts_out(train_pipeline_config):
+    """A per-dataset `val_split_ratio=0.0` opts that dataset out of validation.
+
+    `make_dataset` still returns a `(train, val)` tuple (the branch is gated on
+    `val_freq`, not the ratio), but the val half is empty and all samples stay
+    in train. The empty val `Subset` is harmless in the val mixture: it carries
+    no samples, and `WeightedDatasetMixture._calculate_sample_weights` skips
+    length-0 members regardless of their weight (covered in
+    `test_dataset_mixture.py::...skips_empty_member`).
+    """
+    dataset_cfg = train_pipeline_config.dataset_mixture.datasets[0]
+    cleanup = _register_mapping(dataset_cfg.repo_id)
+    try:
+        dataset_cfg.val_split_ratio = 0.0  # opt this dataset out of validation
+        train_pipeline_config.dataset_mixture.val_split_ratio = 0.05
+        train_pipeline_config.val_freq = 1
+
+        with (
+            patch("opentau.datasets.factory.LeRobotDatasetMetadata") as mock_meta_cls,
+            patch("opentau.datasets.factory.LeRobotDataset") as mock_ds_cls,
+        ):
+            mock_meta_cls.return_value = MagicMock(features=[])
+            mock_ds = MagicMock(meta=MagicMock(info={}, stats={}, camera_keys=[]))
+            mock_ds.__len__.return_value = 100
+            mock_ds.shallow_copy_with_dropout.return_value = mock_ds
+            mock_ds_cls.return_value = mock_ds
+
+            result = make_dataset(dataset_cfg, train_pipeline_config)
+
+        assert isinstance(result, tuple)
+        train_dataset, val_dataset = result
+        assert len(val_dataset) == 0  # int(100 * 0.0) == 0: empty val split
+        assert len(train_dataset) == 100  # every sample remains for training
+    finally:
+        cleanup()
+
+
 # TODO(aliberts): Move to more appropriate location
 def test_flatten_unflatten_dict():
     d = {
