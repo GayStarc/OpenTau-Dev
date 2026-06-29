@@ -114,7 +114,7 @@ Prerequisites
 
 **Python**
 
-* OpenTau targets **Python 3.10** (see ``requires-python`` in the repo root
+* OpenTau targets **Python 3.12** (see ``requires-python`` in the repo root
   ``pyproject.toml``). Match or reconcile Python versions with your RoboCasa
   environment.
 

@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Disable interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # ffmpeg for video processing
 # git for installing dependencies from git
 # libgl1 and libglib2.0-0 for opencv and potential gui deps
-# python3.10 and related tools
+# python3.12 and related tools
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
@@ -16,9 +16,9 @@ RUN apt-get update && apt-get install -y \
     git \
     libgl1 \
     libglib2.0-0 \
-    python3.10 \
-    python3.10-venv \
-    python3.10-dev \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -31,8 +31,8 @@ WORKDIR /opentau
 COPY . .
 
 # Create virtual environment and install dependencies
-# We explicitly use the system python 3.10 for the venv
-RUN uv venv .venv --python /usr/bin/python3.10 && \
+# We explicitly use the system python 3.12 for the venv
+RUN uv venv .venv --python /usr/bin/python3.12 && \
     . .venv/bin/activate && \
     uv sync --extra libero --extra dev
 

@@ -35,7 +35,7 @@ These override defaults — read them before running anything.
 
 ## Project overview
 
-OpenTau is Tensor's open-source PyTorch training toolchain for vision-language-action (VLA) models — a fork of LeRobot with extra capabilities (heterogeneous-dataset co-training, discrete actions for π₀.₅, knowledge insulation, dropout in PaliGemma, π*₀.₆-style RL, validation splits, profilers). Any LeRobot-compliant policy and dataset works directly. Pinned to **Python 3.10**.
+OpenTau is Tensor's open-source PyTorch training toolchain for vision-language-action (VLA) models — a fork of LeRobot with extra capabilities (heterogeneous-dataset co-training, discrete actions for π₀.₅, knowledge insulation, dropout in PaliGemma, π*₀.₆-style RL, validation splits, profilers). Any LeRobot-compliant policy and dataset works directly. Pinned to **Python 3.12**.
 
 ## Environment & install
 
@@ -73,7 +73,7 @@ pre-commit install                           # one-time
 pre-commit run --all-files                   # run all hooks
 ```
 
-The pre-commit suite runs ruff (lint + format, line-length 110, py310), pyupgrade, gitleaks, zizmor (GitHub Actions security), bandit (config in `[tool.bandit]`), and typos. **Run pre-commit *before* tests** — formatters can rewrite files mid-iteration.
+The pre-commit suite runs ruff (lint + format, line-length 110, py312), pyupgrade, gitleaks, zizmor (GitHub Actions security), bandit (config in `[tool.bandit]`), and typos. **Run pre-commit *before* tests** — formatters can rewrite files mid-iteration.
 
 ### Training / eval / export (console scripts)
 
