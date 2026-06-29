@@ -16,6 +16,11 @@ requires-dist = ["einops", "hjson", "msgpack", "ninja", "numpy", "packaging>=20.
 requires-python = ">=3.8"
 
 [[manifest.dependency-metadata]]
+name = "flash-attn"
+requires-dist = ["torch", "einops"]
+requires-python = ">=3.9"
+
+[[manifest.dependency-metadata]]
 name = "numba"
 requires-dist = ["llvmlite>=0.47.0.dev0,<0.48", "numpy>=1.22,<2.5"]
 requires-python = ">=3.10"
@@ -741,6 +746,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/1d/65/ce7f1b70157833bf3
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/36/7fb70f04bf00bc646cd5bb45aa9eddb15e19437a28b8fb2b4a5249fac770/filelock-3.20.3-py3-none-any.whl", hash = "sha256:4b0dda527ee31078689fc205ec4f1c1bf7d56cf88b6dc9426c4f230e46c2dce1", size = 16701, upload-time = "2026-01-09T17:55:04.334Z" },
 ]
+
+[[package]]
+name = "flash-attn"
+version = "2.8.2+v0.1.0.ppu2.1.0.oe"
+source = { registry = "https://aiext-pypi.mirrors.aliyuncs.com/pg1-pip/pypi_index/simple/" }
+dependencies = [
+    { name = "einops", marker = "sys_platform == 'linux'" },
+    { name = "torch", marker = "sys_platform == 'linux'" },
+]
+sdist = { url = "https://aiext-pypi.mirrors.aliyuncs.com/pg1-pip/pypi_index/packages/flash-attn/2.8.2+v0.1.0.ppu2.1.0.oe/flash_attn-2.8.2+v0.1.0.ppu2.1.0.oe.tar.gz", hash = "sha256:71fda1703d86c5d1de759c5d36160c7a7710a96fbf6b9ed4d41231ef7c846c88" }
 
 [[package]]
 name = "flask"
@@ -2148,6 +2163,7 @@ dependencies = [
     { name = "diffusers" },
     { name = "draccus" },
     { name = "einops" },
+    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "flask" },
     { name = "gdown" },
     { name = "google-genai" },
@@ -2251,6 +2267,7 @@ requires-dist = [
     { name = "easydict", marker = "extra == 'libero'", specifier = "==1.9" },
     { name = "egl-probe", marker = "extra == 'libero'", git = "https://github.com/shuheng-liu/egl_probe?tag=v1.0.1-cmake4" },
     { name = "einops", specifier = ">=0.8.0" },
+    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==2.8.2", index = "https://aiext-pypi.mirrors.aliyuncs.com/pg1-pip/pypi_index/simple/" },
     { name = "flask", specifier = ">=3.0.3" },
     { name = "future", marker = "extra == 'libero'", specifier = "==0.18.2" },
     { name = "gdown", specifier = ">=5.1.0" },

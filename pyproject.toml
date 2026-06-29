@@ -86,6 +86,7 @@ dependencies = [
     "pandas>=2.2.2",
     "accelerate>=1.4.0",
     "deepspeed==0.19.0",
+    "flash-attn==2.8.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "gymnasium[other]>=0.29",
     "grpcio>=1.60.0",
     "grpcio-tools>=1.60.0",
@@ -176,6 +177,7 @@ torch = { index = "ppu" }
 torchvision = { index = "ppu" }
 torchcodec = { index = "ppu" }
 deepspeed = { index = "ppu" }
+"flash-attn" = { index = "ppu" }
 "onnxruntime-gpu" = { index = "ppu" }
 numba = { index = "ppu" }
 
@@ -211,7 +213,7 @@ extra-build-dependencies = { egl-probe = ["cmake"] }
 override-dependencies = ["mink>=0.0.10,<0.1"]
 # The PPU shims for these packages import torch at build/install time, so they must
 # be built in the project environment after torch is installed rather than in isolation.
-no-build-isolation-package = ["torchvision", "torchcodec", "deepspeed"]
+no-build-isolation-package = ["torchvision", "torchcodec", "deepspeed", "flash-attn"]
 
 # The PPU index serves small shim sdists whose static metadata is incomplete.
 # Provide the real package metadata so uv can lock without building the shims.
@@ -274,6 +276,14 @@ requires-dist = [
     "pydantic>=2.0.0",
     "torch",
     "tqdm",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+requires-python = ">=3.9"
+requires-dist = [
+    "torch",
+    "einops",
 ]
 
 [[tool.uv.dependency-metadata]]
