@@ -735,6 +735,23 @@ def train(cfg: TrainPipelineConfig):
         accelerator_kwargs["log_with"] = "wandb"
 
     accelerator = accelerate.Accelerator(**accelerator_kwargs)
+    # Early guard: requesting more single-node processes than visible GPUs makes
+    # extra ranks select a non-existent CUDA device, which surfaces inside NCCL
+    # as the cryptic "Cuda failure 'invalid argument'" during the first collective.
+    if (
+        accelerator.distributed_type == accelerate.DistributedType.MULTI_GPU
+        and torch.cuda.is_available()
+    ):
+        local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", accelerator.num_processes))
+        num_visible_devices = torch.cuda.device_count()
+        if local_world_size > num_visible_devices:
+            raise RuntimeError(
+                f"DDP mismatch on this node: {local_world_size} process(es) requested but only "
+                f"{num_visible_devices} CUDA device(s) visible. Either use a node with "
+                f"{local_world_size} GPUs, or launch with NUM_PROCESSES={num_visible_devices} "
+                "and a matching Accelerate config (e.g. "
+                "configs/examples/accelerate_ddp_config_2gpu.yaml)."
+            )
     # ``cfg.output_dir`` embeds a per-process wall-clock timestamp (assigned in
     # ``TrainPipelineConfig`` as ``f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{job_name}"``) and every
     # rank parses the config independently, so a launch whose startup straddles a one-second

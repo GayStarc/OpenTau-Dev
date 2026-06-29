@@ -53,6 +53,27 @@ def _preferred_dtype():
     return torch.float32 if torch.onnx.is_in_onnx_export() else torch.bfloat16
 
 
+def _drop_shape_mismatched_keys(
+    state_dict: dict[str, Tensor], model_state_dict: dict[str, Tensor]
+) -> tuple[dict[str, Tensor], frozenset[str], dict[str, tuple[tuple[int, ...], tuple[int, ...]]]]:
+    """Drop checkpoint tensors whose names match but tensor shapes do not.
+
+    ``strict=False`` still raises on size mismatches, so warm-starting pi05 on
+    a dataset with a different state/action dimensionality would otherwise
+    abort loading and leave the whole model randomly initialized.
+    """
+    mismatched_shapes = {
+        key: (tuple(value.shape), tuple(model_state_dict[key].shape))
+        for key, value in state_dict.items()
+        if key in model_state_dict and tuple(value.shape) != tuple(model_state_dict[key].shape)
+    }
+    mismatched_keys = frozenset(mismatched_shapes)
+    if not mismatched_keys:
+        return state_dict, mismatched_keys, mismatched_shapes
+    filtered = {key: value for key, value in state_dict.items() if key not in mismatched_keys}
+    return filtered, mismatched_keys, mismatched_shapes
+
+
 def create_sinusoidal_pos_embedding(
     time: Tensor, dimension: int, min_period: float, max_period: float, device: torch.device | str = "cpu"
 ) -> Tensor:
@@ -439,13 +460,30 @@ class PI05Policy(PreTrainedPolicy):
             # `(*feat_shape,)` to the new `(1, *feat_shape)` stacked layout so pre-PR
             # checkpoints load via `model.load_state_dict(...)`.
             model._promote_legacy_norm_buffers_in_state_dict(remapped_state_dict)
+            remapped_state_dict, mismatched_shape_keys, mismatched_shapes = _drop_shape_mismatched_keys(
+                remapped_state_dict, model.state_dict()
+            )
+            if mismatched_shape_keys:
+                if is_main_process:
+                    print(
+                        "Skipping shape-mismatched checkpoint keys so compatible weights can still load: "
+                        f"{len(mismatched_shape_keys)} keys"
+                    )
+                    for key in sorted(mismatched_shape_keys)[:20]:
+                        checkpoint_shape, model_shape = mismatched_shapes[key]
+                        print(
+                            f"  - {key}: checkpoint shape {checkpoint_shape}, model shape {model_shape}"
+                        )
+                    if len(mismatched_shape_keys) > 20:
+                        print(f"  ... and {len(mismatched_shape_keys) - 20} more")
             missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=False)
 
             # Hide deliberately-stripped buffer keys from the missing-keys
             # warning so the noisy log does not directly contradict the INFO
             # logged just above. ``stripped_keys`` is empty when the flag is
             # off, so this is a no-op for default loads.
-            unintended_missing = [key for key in missing_keys if key not in stripped_keys]
+            expected_missing = stripped_keys | mismatched_shape_keys
+            unintended_missing = [key for key in missing_keys if key not in expected_missing]
 
             if unintended_missing and is_main_process:
                 print(f"Missing keys when loading state dict: {len(unintended_missing)} keys")

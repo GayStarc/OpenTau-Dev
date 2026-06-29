@@ -1,0 +1,124 @@
+{
+    "dataset_mixture": {
+        "datasets": [
+            {
+                "repo_id": "lerobot_v30_pour_drink_0624",
+                "root": "/mnt/nas/guchenyang/Data/Sharpa/lerobot_v30_pour_drink_0624",
+                "robot_type": "tianji_sharpa",
+                "data_features_name_mapping": {
+                    "camera0": "observation.images.head_left",
+                    "camera1": "observation.images.left_wrist",
+                    "camera2": "observation.images.right_wrist",
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "task",
+                    "response": "task"
+                }
+            }
+        ],
+        "weights": [
+            1.0
+        ],
+        "action_freq": 10.0,
+        "image_resample_strategy": "nearest",
+        "vector_resample_strategy": "nearest",
+        "val_split_ratio": 0.05,
+        "history_state_drop_prob": 0.0,
+        "subgoal_drop_prob": 1.0,
+        "response_drop_prob": 0.0,
+        "metadata_drop_all_prob": 0.0,
+        "metadata_drop_each_prob": 0.0,
+        "skip_timestamp_check": false
+    },
+    "policy": {
+        "type": "pi05",
+        "pretrained_path": "/mnt/nas/guchenyang/Pretrain/OpenTau/pi05_base",
+        "n_obs_steps": 1,
+        "normalization_mapping": {
+            "VISUAL": "IDENTITY",
+            "STATE": "MEAN_STD",
+            "ACTION": "MEAN_STD"
+        },
+        "chunk_size": 10,
+        "predict_response": true,
+        "n_action_steps": 10,
+        "max_state_dim": 58,
+        "max_action_dim": 58,
+        "proj_width": 1024,
+        "num_steps": 10,
+        "attention_implementation": "eager",
+        "freeze_vision_encoder": true,
+        "train_expert_only": true,
+        "prompt_max_length": 256,
+        "discrete_action_max_length": 100,
+        "gradient_checkpointing": false,
+        "use_torch_compile": false,
+        "optimizer_lr": 2.5e-05,
+        "optimizer_betas": [
+            0.9,
+            0.95
+        ],
+        "optimizer_eps": 1e-08,
+        "optimizer_weight_decay": 1e-10,
+        "scheduler_warmup_steps": 1000,
+        "scheduler_decay_steps": 30000,
+        "scheduler_decay_lr": 2.5e-06
+    },
+    "output_dir": "outputs/train/pi05_sharpa_pour_drink",
+    "resume": false,
+    "seed": 1000,
+    "resolution": [
+        224,
+        224
+    ],
+    "num_cams": 3,
+    "max_state_dim": 58,
+    "max_action_dim": 58,
+    "action_chunk": 10,
+    "loss_weighting": {
+        "MSE": 1,
+        "CE": 1
+    },
+    "num_workers": 4,
+    "batch_size": 2,
+    "gradient_accumulation_steps": 1,
+    "dataloader_batch_size": 2,
+    "prefetch_factor": 4,
+    "steps": 10000,
+    "log_freq": 10,
+    "save_checkpoint": true,
+    "save_freq": 1000,
+    "val_freq": 500,
+    "use_policy_training_preset": false,
+    "trace_nans": false,
+    "optimizer": {
+        "type": "adamw",
+        "lr": 2.5e-05,
+        "weight_decay": 1e-10,
+        "grad_clip_norm": 10.0,
+        "betas": [
+            0.9,
+            0.95
+        ],
+        "eps": 1e-08
+    },
+    "scheduler": {
+        "type": "cosine_decay_with_warmup",
+        "num_warmup_steps": 1000,
+        "num_decay_steps": 30000,
+        "peak_lr": 2.5e-05,
+        "decay_lr": 2.5e-06
+    },
+    "wandb": {
+        "enable": false,
+        "project": "pi05_sharpa",
+        "name": "pi05_sharpa_pour_drink",
+        "notes": "Train pi05_base on local Sharpa pour-drink LeRobot v3.0 dataset.",
+        "tags": [
+            "pi05",
+            "sharpa",
+            "pour_drink"
+        ],
+        "mode": "disabled"
+    }
+}

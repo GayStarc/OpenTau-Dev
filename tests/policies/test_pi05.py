@@ -19,10 +19,30 @@ from einops import rearrange
 from opentau.policies.pi05.configuration_pi05 import PI05Config
 from opentau.policies.pi05.modeling_pi05 import (
     PI05Policy,
+    _drop_shape_mismatched_keys,
 )
 
 PALIGEMMA_TOKENIZER_EOS_IDS = 1
 PALIGEMMA_TOKENIZER_PAD_IDS = 0
+
+
+def test_drop_shape_mismatched_keys_keeps_compatible_weights():
+    state_dict = {
+        "model.shared.weight": torch.ones(2, 3),
+        "model.action_in_proj.weight": torch.ones(4, 32),
+        "model.extra.weight": torch.ones(1),
+    }
+    model_state_dict = {
+        "model.shared.weight": torch.zeros(2, 3),
+        "model.action_in_proj.weight": torch.zeros(4, 58),
+    }
+
+    filtered, skipped, shapes = _drop_shape_mismatched_keys(state_dict, model_state_dict)
+
+    assert set(filtered) == {"model.shared.weight", "model.extra.weight"}
+    assert skipped == {"model.action_in_proj.weight"}
+    assert shapes == {"model.action_in_proj.weight": ((4, 32), (4, 58))}
+    assert filtered["model.shared.weight"] is state_dict["model.shared.weight"]
 
 
 class TestPI05Integration:
