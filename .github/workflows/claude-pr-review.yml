@@ -15,8 +15,7 @@
 name: Claude PR Review
 
 on:
-  pull_request:
-    types: [opened, synchronize]
+  workflow_dispatch:
 
 # Cancel a stale review when a new commit is pushed to the same PR.
 concurrency:

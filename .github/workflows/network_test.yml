@@ -23,9 +23,6 @@ name: Network Tests
 
 on:
   workflow_dispatch:
-  schedule:
-    # Nightly at 10:00 UTC, alongside the gpu / regression nightlies.
-    - cron: "0 10 * * *"
 
 permissions:
   contents: read

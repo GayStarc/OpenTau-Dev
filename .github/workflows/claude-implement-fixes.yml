@@ -15,17 +15,7 @@
 name: Claude Implement Fixes
 
 on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-  # GitHub does NOT fire pull_request_review_comment.created for line comments
-  # bundled into a submitted review — only for standalone replies via the
-  # inline "Reply" button. Listening to pull_request_review.submitted catches
-  # the bundled-line-comment case (e.g. "Add review" → "Submit review" with
-  # @claude fix in a line comment and an empty review body).
-  pull_request_review:
-    types: [submitted]
+  workflow_dispatch:
 
 # Serialize implement-fix runs against the same PR so two rapid `@claude fix`
 # comments don't race on the PR branch.
